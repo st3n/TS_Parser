@@ -24,8 +24,6 @@
 #define ntohll(x) (((uint64_t)(ntohl((int)((x << 32) >> 32))) << 32) | (unsigned int)ntohl(((int)(x >> 32))))
 #define htonll(x) ntohll(x)
 
-static uint32_t readBytes = 0;
- // description of the PAT section (version, number) Used to prevent handlind the same table sections
 std::map<uint8_t, uint8_t> sectionDesc;
 std::vector<uint32_t> PMTList;
 std::vector<uint32_t> videoPIDs;
@@ -34,14 +32,14 @@ std::vector<uint32_t> subtitlePIDs;
 std::vector<uint32_t> teletextPIDs;
 
 struct TSPacketHeader {
-   unsigned        continuityCounter : 4;       // 4  Continuity counter
-   unsigned        adaptationFieldControl : 2;  // 2  Adaptation field control
-   unsigned        scramblingControl : 2;       // 2  Transport scrambling control
-   unsigned        PID : 13;                    // 13 Packet ID
-   bool            priority : 1;                // 1  Transport Priority
-   bool            PUSI : 1;                    // 1  Payload Unit Start Indicator
-   bool            TEI : 1;                     // 1  Transport Error Indicator
-   unsigned char   syncByte : 8;                // 8  Synced byte in each packet
+   unsigned  continuityCounter : 4;       // 4  Continuity counter
+   unsigned  adaptationFieldControl : 2;  // 2  Adaptation field control
+   unsigned  scramblingControl : 2;       // 2  Transport scrambling control
+   unsigned  PID : 13;                    // 13 Packet ID
+   bool      priority : 1;                // 1  Transport Priority
+   bool      PUSI : 1;                    // 1  Payload Unit Start Indicator
+   bool      TEI : 1;                     // 1  Transport Error Indicator
+   unsigned  syncByte : 8;                // 8  Synced byte in each packet
 };
 
 // PSI (Program Specific Information) structures
@@ -52,7 +50,7 @@ struct TSPSIHeader {
    uint8_t privateFlag;   // 1 private indicator
    // 2 reserved
    uint16_t sectionLen;          // 12 section length
-   uint32_t lenPos;       // need to count the end of PAT section
+   uint32_t syntaxSectionPos;       // need to count the end of PAT section
    // if (syntax_flag == 0), next private data len-4 bytes
    // if (syntax_flag == 1), then use next fields:
    uint16_t extId;        // 16 PAT use this for TS identifier
@@ -115,18 +113,43 @@ bool isBigEndian() {
    return check.p[0] == 1;
 }
 
-void swapByteOrder(uint32_t& ui)
-{
-    ui = (ui >> 24) |
-         ((ui << 8) & 0x00ff0000) |
-         ((ui >> 8) & 0x0000ff00) |
-         (ui << 24);
+inline uint8_t getbits8(char* buf, size_t& pos) {
+   uint8_t tmp8;
+   tmp8 = buf[pos];
+   pos += 1;
+   return tmp8;
 }
 
-void printTSPachetHeader(const TSPacketHeader& pHead) {
+inline uint16_t getbits16(char* buf, size_t& pos) {
+   uint16_t tmp16;
+   tmp16 = (buf[pos] << 8 & 0xff00)
+         | (buf[pos+1]    & 0x00ff);
+   pos += 2;
+   return tmp16;
+}
+
+inline uint32_t getbits32(char* buf, size_t& pos) {
+   uint32_t tmp32;
+   tmp32 = (buf[pos]   << 24 & 0xff000000)
+         | (buf[pos+1] << 16 & 0x00ff0000)
+         | (buf[pos+2] << 8  & 0x0000ff00)
+         | (buf[pos+3]       & 0x000000ff);
+
+   pos += 4;
+   return tmp32;
+}
+
+inline uint64_t getbits64(char* buf, size_t& pos) {
+   uint64_t tmp64;
+   tmp64 = ((uint64_t)getbits32(buf, pos) << 32 & 0xffffffff00000000)
+         |           (getbits32(buf, pos)       & 0x00000000ffffffff);
+   return tmp64;
+}
+
+void printTSPacketHeader(const TSPacketHeader& pHead) {
    std::cout << std::endl;
-   std::cout << "Sync byte: " << pHead.syncByte << std::endl;
-   std::cout << "Transport Error Indicator: " << pHead.TEI << std::endl;
+   std::cout << "Sync byte: 0x" << std::hex << (int) pHead.syncByte << std::endl;
+   std::cout << "Transport Error Indicator: "<<std::dec << pHead.TEI << std::endl;
    std::cout << "Payload Unit Start Indicator: " << pHead.PUSI << std::endl;
    std::cout << "Transport Priority: " << pHead.priority << std::endl;
    std::cout << "PID: " << pHead.PID << std::endl;
@@ -137,7 +160,7 @@ void printTSPachetHeader(const TSPacketHeader& pHead) {
 }
 
 // Just another approuch to parse TS header if compiler will not be able
-// map readed 4 bytes to the structure with bit filds
+// map read 4 bytes to the structure with bit filds
 class TSPacketHeader2 {
 public:
    uint8_t  syncByte;
@@ -178,8 +201,8 @@ std::string TSPacketHeader2::toString() const {
    std::ostringstream oss;
    oss << "\nTSHeader2 approach\n";
    oss << "Row data: " <<  *this->rowData << "\n";
-   oss << "Sync byte: " << (char)(this->syncByte) << "\n";
-   oss << "Transport Error Indicator: " << (unsigned)this->TEI << "\n";
+   oss << "Sync byte: 0x" << std::hex << (int)(this->syncByte) << "\n";
+   oss << "Transport Error Indicator: " << std::dec << (unsigned)this->TEI << "\n";
    oss << "Payload Unit Start Indicator: " << (unsigned)this->PUSI << "\n";
    oss << "Transport Priority: " << (unsigned)this->priority << "\n";
    oss << "PID: " << (unsigned)(this->PID) << "\n";
@@ -189,12 +212,11 @@ std::string TSPacketHeader2::toString() const {
    return oss.str();
 }
 
-void parsePATSectionHeader(std::ifstream& instream, uint64_t& section) {
+void parsePATSectionHeader(uint64_t& section) {
    patTable.th.tableId = section >> 56;
    patTable.th.syntaxFlag = (section >> 55) & 0x1;
    patTable.th.privateFlag = (section >> 54) & 0x1;
    patTable.th.sectionLen = (section >> 40) & 0x3ff;
-   patTable.th.lenPos = instream.tellg();
 
    if (patTable.th.syntaxFlag) {
       patTable.th.extId = (section >> 24) & 0xffff; // TS identifier
@@ -211,44 +233,41 @@ void parsePATSectionHeader(std::ifstream& instream, uint64_t& section) {
    }
 }
 
-void parsePATSection(std::ifstream& instream) {
+void parsePATSection(char* buf, size_t pos) {
    uint32_t sectionEnd, data;
    TSPATRecord *record;
-   //patTable.recordCount = 0;
-   sectionEnd = patTable.th.lenPos + patTable.th.sectionLen - 4; // - CRC32
-   while (readBytes < 188 && instream.tellg() < sectionEnd) {
+   sectionEnd = patTable.th.syntaxSectionPos + patTable.th.sectionLen - 4 - 5; // -CRC32-syntax header
+   while ((pos % 188 != 0) && (pos < sectionEnd)) {
       record = &patTable.records[patTable.recordCount];
       patTable.recordCount++;
-      instream.read(reinterpret_cast<char*> (&data), 4);
-      readBytes += 4;
-      data = ntohl(data);
+      data = getbits32(buf, pos);
       record->num = data >> 16;
       record->pid = data & 0x7ff;
       printf("Program number = %u PMT PID = 0x%04x \n", record->num, record->pid);
    }
 }
 
-void findPATInfo(std::ifstream& instream) {
+void findPATInfo(char* buf, size_t size) {
    uint32_t packetsAmount = 0, packWithPID0 = 0;
-   uint32_t buff;
+   uint32_t tsHeader;
+   size_t pos = 0;
 
-   while (instream.read(reinterpret_cast<char*> (&buff), 4)) {
-      readBytes += 4;
-      ++packetsAmount;
-      buff = ntohl(buff);
-      TSPacketHeader* pTSHeader = reinterpret_cast<TSPacketHeader*>(&buff);
+   printf("\n------------PAT INFO-------------\n");
+   while (pos < size) {
+      packetsAmount++;
+      tsHeader = getbits32(buf, pos);
 
+      TSPacketHeader* pTSHeader = reinterpret_cast<TSPacketHeader*>(&tsHeader);
       if (pTSHeader->syncByte != 0x47 || pTSHeader->TEI) {
          fprintf(stderr, "Something wrong with packet number %d!\n", packetsAmount);
          fprintf(stderr, "Sync byte: 0x%x, TEI: %d\n", pTSHeader->syncByte, pTSHeader->TEI);
-         instream.ignore(184);
-         readBytes = 0;
+         std::cout << "\nPositon in buffer before : " << pos << std::endl;
+         pos += 184;
          continue;
       }
 
       if (pTSHeader->PID != 0x0 || pTSHeader->adaptationFieldControl > 1) {
-         instream.ignore(184);
-         readBytes = 0;
+         pos += 184;
          continue;
       }
       ++packWithPID0;
@@ -256,13 +275,11 @@ void findPATInfo(std::ifstream& instream) {
       if (pTSHeader->adaptationFieldControl == 0x1) {
          if (pTSHeader->PUSI) {
             uint8_t pointerField = 0x0000;
-            instream.read(reinterpret_cast<char*> (&pointerField), 1);
-            instream.ignore(pointerField);
-            readBytes += pointerField + 1;
+            pointerField = getbits8(buf, pos);
+            pos += pointerField;
             patTable.th.pointerField = pointerField;
             uint64_t section;
-            instream.read(reinterpret_cast<char*> (&section), 8);
-            section = ntohll(section);
+            section = getbits64(buf, pos);
             uint8_t sectionNumb = 0x0000;
             uint8_t versionNumb = 0x0000;
             versionNumb = (section & 0x3e0000) >> 17;
@@ -270,25 +287,24 @@ void findPATInfo(std::ifstream& instream) {
             if (    sectionDesc.count(sectionNumb)
                  && sectionDesc[sectionNumb] == versionNumb)
             {
-               readBytes += 8;
-               instream.ignore(188-readBytes);
+               pos += 188 - pos % 188;
                continue;
             }
-            readBytes += 8;
             patTable.th.sectionNum = sectionNumb;
             patTable.th.version = versionNumb;
+            patTable.th.syntaxSectionPos = pos;
             sectionDesc[sectionNumb] = versionNumb;
-            parsePATSectionHeader(instream, section);
+            parsePATSectionHeader(section);
          }
          else std::cerr << "PAT with PUSI 0" << std::endl;
-         parsePATSection(instream);
+         parsePATSection(buf, pos);
       }
       else std::cerr << "PAT section without payload\n";
-      if (188-readBytes > 0)
-         instream.ignore(188-readBytes);
-      readBytes = 0;
+      if (pos % 188 > 0)
+         pos += 188 - pos % 188;
    }
-   std::cout << "\nPositon in file : " << instream.tellg() << std::endl;
+   printf("\n------------END PAT INFO-------------\n");
+   std::cout << "\nPositon in buffer after : " << pos << std::endl;
    std::cout << "Amount of records in the PAT table: " << patTable.recordCount << std::endl;
    std::cout << "Number of packets: " << packetsAmount << std::endl;
    std::cout << "Packets with PID 0: " << packWithPID0 << std::endl;
@@ -307,12 +323,17 @@ int main(int argc, char *argv[])
    if (!instream.is_open())
       throw std::runtime_error("Can not open input file!");
 
-   int len = instream.tellg();
-   printf("\nLength of the %s is %d bytes\n\n", argv[1], len);
+   size_t size = instream.tellg();
    instream.seekg(std::ios::beg);
-   findPATInfo(instream);
-
+   char* data = new char[size];
+   instream.read(data, size);
+   printf("\nLength of the %s is %d bytes\n\n", argv[1], (int)size);
    instream.close();
+
+   findPATInfo(data, size);
+
+
+   delete [] data;
    return 0;
 }
 
